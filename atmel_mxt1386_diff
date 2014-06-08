@@ -1,0 +1,88 @@
+*** drivers/input/touchscreen/atmel_mxt1386.c
+--- drivers/input/touchscreen/atmel_mxt1386.c
+***************
+*** 22,27 ****
+--- 22,29 ----
+   *  Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+   */
+  
++ #define FIX_CHIP_HANG
++ 
+  #define	DEBUG_INFO      1
+  #define	DEBUG_VERBOSE   2
+  #define	DEBUG_MESSAGES  5
+***************
+*** 2539,2544 ****
+--- 2541,2550 ----
+  /* Initialization of driver                                                   */
+  /******************************************************************************/
+  
++ #ifdef FIX_CHIP_HANG
++ extern int mxt_do_firmware_load(struct mxt_data *mxt, const char *fn);
++ #endif
++ 
+  static int __devinit mxt_identify(struct i2c_client *client,
+  				  struct mxt_data *mxt)
+  {
+***************
+*** 2559,2564 ****
+--- 2565,2585 ----
+  		msleep(30);
+  		goto retry_i2c;
+  	}
++ #ifdef FIX_CHIP_HANG
++ 	/* If we tried twice and no response, maybe it's in firmware
++  	 * load mode. Try to upload firmware.
++  	 */
++ 	if (mxt->read_fail_counter == 2) {
++ 		printk(KERN_DEBUG "Trying firmware reload.");
++ 		mxt->last_read_addr = -1;
++ 
++ 		mxt_do_firmware_load(mxt, MXT1386_FIRMWARE);
++ 
++ 		reset_chip(mxt, RESET_TO_NORMAL);
++ 		msleep(300);
++ 		goto retry_i2c;
++ 	}
++ #endif
+  		dev_err(&client->dev, "Failure accessing maXTouch device\n");
+  		return -EIO;
+  	}
+diff -c drivers/input/touchscreen/orig/atmel_mxt1386_cfg.c drivers/input/touchscreen/atmel_mxt1386_cfg.c
+*** drivers/input/touchscreen/orig/atmel_mxt1386_cfg.c	2012-10-10 08:12:43.773952501 -0400
+--- drivers/input/touchscreen/atmel_mxt1386_cfg.c	2012-10-10 08:36:55.704576439 -0400
+***************
+*** 408,417 ****
+  
+  	return 0;
+  }
+- int mxt_load_firmware(struct device *dev, const char *fn)
+- {
+- 	struct mxt_data *mxt = dev_get_drvdata(dev);
+  
+  	unsigned int frame_size;
+  	unsigned int pos = 0;
+  	unsigned int retry;
+--- 408,416 ----
+  
+  	return 0;
+  }
+  
++ int mxt_do_firmware_load(struct mxt_data *mxt, const char *fn) 
++ {
+  	unsigned int frame_size;
+  	unsigned int pos = 0;
+  	unsigned int retry;
+***************
+*** 518,520 ****
+--- 517,526 ----
+  	return ret;
+  }
+  
++ int mxt_load_firmware(struct device *dev, const char *fn)
++ {
++ 	struct mxt_data *mxt = dev_get_drvdata(dev);
++ 
++ 	return mxt_do_firmware_load(mxt, fn);
++ }
++ 

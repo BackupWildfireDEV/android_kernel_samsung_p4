@@ -1,0 +1,291 @@
+From c599fe1c6472d933c3ef1bf07fc0eaec5c73de3a Mon Sep 17 00:00:00 2001
+From: grzwolf <grzwolf@ubuntu1204.(none)>
+Date: Mon, 10 Jun 2013 19:55:49 +0200
+Subject: [PATCH] replace mif P4 with mif P5 to fix l2_hsic issue
+
+---
+ drivers/misc/modem_if/modem_link_device_dpram.c    |    4 ++++
+ drivers/misc/modem_if/modem_link_device_hsic.c     |   25 ++++++++++++++++----
+ drivers/misc/modem_if/modem_link_device_usb.c      |   21 ++++------------
+ drivers/misc/modem_if/modem_link_device_usb.h      |    1 -
+ drivers/misc/modem_if/modem_link_pm_usb.c          |    2 --
+ .../misc/modem_if/modem_modemctl_device_cbp71.c    |   15 ++++++++++++
+ .../misc/modem_if/modem_modemctl_device_cmc220.c   |    3 +++
+ drivers/misc/modem_if/sipc4_io_device.c            |    3 ++-
+ 8 files changed, 49 insertions(+), 25 deletions(-)
+
+diff --git a/drivers/misc/modem_if/modem_link_device_dpram.c b/drivers/misc/modem_if/modem_link_device_dpram.c
+index 57ccf6c..71e6219 100644
+--- a/drivers/misc/modem_if/modem_link_device_dpram.c
++++ b/drivers/misc/modem_if/modem_link_device_dpram.c
+@@ -1278,7 +1278,11 @@ static int dpram_download
+ 		header.curframe = curframe;
+ 		header.len = plen;
+ 
++#ifdef CONFIG_ARCH_TEGRA
++		_memcpy(dest, &header, sizeof(header));
++#else
+ 		memcpy(dest, &header, sizeof(header));
++#endif
+ 		dest += sizeof(header);
+ 
+ #ifdef CONFIG_ARCH_TEGRA
+diff --git a/drivers/misc/modem_if/modem_link_device_hsic.c b/drivers/misc/modem_if/modem_link_device_hsic.c
+index ddeca4b..4b3feaa 100644
+--- a/drivers/misc/modem_if/modem_link_device_hsic.c
++++ b/drivers/misc/modem_if/modem_link_device_hsic.c
+@@ -74,6 +74,12 @@ static int start_ipc(struct link_device *ld, struct io_device *iod)
+ 		goto exit;
+ 	}
+ 
++	if (ld->mc->phone_state != STATE_ONLINE) {
++		mif_err("[MODEM_IF] MODEM is not online, skip start ipc\n");
++		err = -ENODEV;
++		goto exit;
++	}
++
+ 	mif_err("send 'a'\n");
+ 
+ 	skb = alloc_skb(16, GFP_ATOMIC);
+@@ -698,11 +704,17 @@ static void link_pm_reconnect_work(struct work_struct *work)
+ 					link_reconnect_work.work);
+ 	struct modem_ctl *mc = if_usb_get_modemctl(pm_data);
+ 
+-	if (!mc || pm_data->usb_ld->if_usb_connected)
++	mif_info("\n");
++
++	if (!mc || pm_data->usb_ld->if_usb_connected) {
++		mif_err("mc or if_usb_connected is invalid\n");
+ 		return;
++	}
+ 
+-	if (pm_data->usb_ld->ld.com_state != COM_ONLINE)
++	if (pm_data->usb_ld->ld.com_state != COM_ONLINE) {
++		mif_err("com_state is not COM_ONLINE\n");
+ 		return;
++	}
+ 
+ 	if (pm_data->link_reconnect_cnt--) {
+ 		if (mc->phone_state == STATE_ONLINE &&
+@@ -952,6 +964,7 @@ static int link_pm_notifier_event(struct notifier_block *this,
+ {
+ 	struct link_pm_data *pm_data =
+ 			container_of(this, struct link_pm_data,	pm_notifier);
++	struct usb_device *usbdev = pm_data->usb_ld->usbdev;
+ #ifdef CONFIG_UMTS_MODEM_XMM6262
+ 	struct modem_ctl *mc = if_usb_get_modemctl(pm_data);
+ #endif
+@@ -978,11 +991,12 @@ static int link_pm_notifier_event(struct notifier_block *this,
+ 		queue_delayed_work(pm_data->wq, &pm_data->link_pm_start, 0);
+ 		#endif
+ 		if (gpio_get_value(pm_data->gpio_link_hostwake)
+-			!= HOSTWAKE_TRIGLEVEL) {
++			== HOSTWAKE_TRIGLEVEL) {
+ 			queue_delayed_work(pm_data->wq, &pm_data->link_pm_work,
+ 				0);
+ 			pr_info("%s: post resume\n", __func__);
+ 		}
++		usb_set_autosuspend_delay(usbdev, 200);
+ 		return NOTIFY_OK;
+ 	}
+ 	return NOTIFY_DONE;
+@@ -1284,8 +1298,10 @@ static int __devinit if_usb_probe(struct usb_interface *intf,
+ 	}
+ 
+ 	/* HSIC main comm channel has been established */
+-	if (pipe == IF_USB_CMD_EP)
++	if (pipe == IF_USB_CMD_EP) {
+ 		link_pm_change_modem_state(usb_ld->link_pm_data, STATE_ONLINE);
++		enable_irq(usb_ld->link_pm_data->irq_link_hostwake);
++	}
+ 
+ 	mif_info("successfully done\n");
+ 
+@@ -1429,6 +1445,7 @@ static int usb_link_pm_init(struct usb_link_device *usb_ld, void *data)
+ 		mif_err("failed to enable_irq_wake:%d\n", r);
+ 		goto err_set_wake_irq;
+ 	}
++	disable_irq(pm_data->irq_link_hostwake);
+ 
+ 	/* create work queue & init work for runtime pm */
+ 	pm_data->wq = create_singlethread_workqueue("linkpmd");
+diff --git a/drivers/misc/modem_if/modem_link_device_usb.c b/drivers/misc/modem_if/modem_link_device_usb.c
+index f77c637..c1abcf8 100644
+--- a/drivers/misc/modem_if/modem_link_device_usb.c
++++ b/drivers/misc/modem_if/modem_link_device_usb.c
+@@ -33,7 +33,6 @@
+ #include "modem_link_pm_usb.h"
+ 
+ #define URB_COUNT	4
+-static usb_modem_state;
+ extern int lte_airplain_mode;
+ static int wakelock_held;
+ 
+@@ -517,7 +516,7 @@ static void wait_enumeration_work(struct work_struct *work)
+ 
+ 	if (usb_ld->if_usb_connected == 0) {
+ 		mif_err("USB disconnected and not enumerated for long time\n");
+-		usb_change_modem_state(usb_ld, STATE_CRASH_EXIT);
++		usb_change_modem_state(usb_ld, STATE_CRASH_RESET);
+ 	}
+ }
+ 
+@@ -643,6 +642,8 @@ static void if_usb_disconnect(struct usb_interface *intf)
+ 		/*wake_unlock(&usb_ld->susplock);*/
+ 		usb_put_dev(usbdev);
+ 		usb_ld->usbdev = NULL;
++		schedule_delayed_work(&usb_ld->wait_enumeration,
++				msecs_to_jiffies(40000));
+ 	}
+ }
+ 
+@@ -766,8 +767,7 @@ static int __devinit if_usb_probe(struct usb_interface *intf,
+ 	SET_HOST_ACTIVE(usb_ld->pdata, 1);
+ 	usb_ld->host_wake_timeout_flag = 0;
+ 
+-	if (gpio_get_value(usb_ld->pdata->gpio_phone_active)
+-		&& usb_modem_state) {
++	if (gpio_get_value(usb_ld->pdata->gpio_phone_active)) {
+ 		struct link_pm_data *pm_data = usb_ld->link_pm_data;
+ 		int delay = usb_ld->link_pm_data->autosuspend_delay_ms ?:
+ 				DEFAULT_AUTOSUSPEND_DELAY_MS;
+@@ -800,16 +800,13 @@ static int __devinit if_usb_probe(struct usb_interface *intf,
+ 		/* Queue work if skbs were pending before a disconnect/probe */
+ 		if (ld->sk_fmt_tx_q.qlen || ld->sk_raw_tx_q.qlen)
+ 			queue_delayed_work(ld->tx_wq, &ld->tx_delayed_work, 0);
+-
+ 		usb_ld->if_usb_connected = 1;
+ 		/*USB3503*/
+ 		mif_debug("hub active complete\n");
+ 
+ 		usb_change_modem_state(usb_ld, STATE_ONLINE);
+-		usb_modem_state = 0;
+ 	} else {
+ 		usb_change_modem_state(usb_ld, STATE_LOADER_DONE);
+-		usb_modem_state = 1;
+ 	}
+ 
+ 	return 0;
+@@ -823,16 +820,6 @@ out:
+ 	return err;
+ }
+ 
+-void change_modem_state(struct usb_link_device *usb_ld, enum modem_state state)
+-{
+-	usb_change_modem_state(usb_ld, state);
+-
+-	if (state == STATE_BOOTING)
+-		usb_modem_state = 0; /* Reset usb_modem_state varible */
+-
+-	return 0;
+-}
+-
+ int usb_make_resume(struct usb_link_device *usb_ld)
+ {
+ 	struct device *dev = &usb_ld->usbdev->dev;
+diff --git a/drivers/misc/modem_if/modem_link_device_usb.h b/drivers/misc/modem_if/modem_link_device_usb.h
+index 35627f2..3538efb 100644
+--- a/drivers/misc/modem_if/modem_link_device_usb.h
++++ b/drivers/misc/modem_if/modem_link_device_usb.h
+@@ -131,6 +131,5 @@ do {								\
+ 
+ int usb_make_resume(struct usb_link_device *usb_ld);
+ irqreturn_t usb_resume_irq(int irq, void *data);
+-void change_modem_state(struct usb_link_device *, enum modem_state);
+ 
+ #endif
+diff --git a/drivers/misc/modem_if/modem_link_pm_usb.c b/drivers/misc/modem_if/modem_link_pm_usb.c
+index b920f5c..0367865 100644
+--- a/drivers/misc/modem_if/modem_link_pm_usb.c
++++ b/drivers/misc/modem_if/modem_link_pm_usb.c
+@@ -244,8 +244,6 @@ static long link_pm_ioctl(struct file *file, unsigned int cmd,
+ 			mif_err("Block autosuspend failed\n");
+ 			err = -ENODEV;
+ 		}
+-		/* Change modem state to STATE_BOOTING */
+-		change_modem_state(usb_ld, STATE_BOOTING);
+ 		break;
+ 	case IOCTL_LINK_ENABLE_AUTOSUSPEND: /* Enable autosuspend */
+ 		mif_info("autosuspend enabled by `%s(%d)'\n",
+diff --git a/drivers/misc/modem_if/modem_modemctl_device_cbp71.c b/drivers/misc/modem_if/modem_modemctl_device_cbp71.c
+index 2447276..4e63b3f 100644
+--- a/drivers/misc/modem_if/modem_modemctl_device_cbp71.c
++++ b/drivers/misc/modem_if/modem_modemctl_device_cbp71.c
+@@ -148,6 +148,20 @@ static int cbp71_boot_off(struct modem_ctl *mc)
+ 	return 0;
+ }
+ 
++static int cbp71_force_crash_exit(struct modem_ctl *mc)
++{
++	struct link_device *ld = get_current_link(mc->iod);
++	struct dpram_link_device *dpld = to_dpram_link_device(ld);
++
++	mif_err("force_crash_exit\n");
++	mif_err("<%s>\n", mc->bootd->name);
++
++	dpld->dpctl->send_intr(INT_CMD(INT_CMD_ERR_DISPLAY));
++	mc->iod->modem_state_changed(mc->iod, STATE_CRASH_EXIT);
++
++	return 0;
++}
++
+ static irqreturn_t phone_active_irq_handler(int irq, void *_mc)
+ {
+ 	int phone_reset = 0;
+@@ -190,6 +204,7 @@ static void cbp71_get_ops(struct modem_ctl *mc)
+ 	mc->ops.modem_reset = cbp71_reset;
+ 	mc->ops.modem_boot_on = cbp71_boot_on;
+ 	mc->ops.modem_boot_off = cbp71_boot_off;
++	mc->ops.modem_force_crash_exit = cbp71_force_crash_exit;
+ }
+ 
+ int cbp71_init_modemctl_device(struct modem_ctl *mc,
+diff --git a/drivers/misc/modem_if/modem_modemctl_device_cmc220.c b/drivers/misc/modem_if/modem_modemctl_device_cmc220.c
+index 10a4e36..5d6b09f 100644
+--- a/drivers/misc/modem_if/modem_modemctl_device_cmc220.c
++++ b/drivers/misc/modem_if/modem_modemctl_device_cmc220.c
+@@ -169,6 +169,7 @@ static int cmc220_dump_reset(struct modem_ctl *mc)
+ 
+ 	msleep(300);
+ 
++	mc->phone_state = STATE_BOOTING;
+ 	return 0;
+ }
+ 
+@@ -184,10 +185,12 @@ static int cmc220_reset(struct modem_ctl *mc)
+ 	if (cmc220_on(mc))
+ 		return -ENXIO;
+ */
++	gpio_set_value(mc->gpio_host_active, 1);
+ 	gpio_set_value(mc->gpio_cp_reset, 0);
+ 	msleep(100);
+ 	gpio_set_value(mc->gpio_cp_reset, 1);
+ 	msleep(100);
++	mc->phone_state = STATE_BOOTING;
+ 	return 0;
+ }
+ 
+diff --git a/drivers/misc/modem_if/sipc4_io_device.c b/drivers/misc/modem_if/sipc4_io_device.c
+index 32112f3..5ad02d6 100644
+--- a/drivers/misc/modem_if/sipc4_io_device.c
++++ b/drivers/misc/modem_if/sipc4_io_device.c
+@@ -1292,6 +1292,7 @@ static int vnet_xmit(struct sk_buff *skb, struct net_device *ndev)
+ 	struct io_device *iod = vnet->iod;
+ 	struct link_device *ld = get_current_link(iod);
+ 	struct raw_hdr hd;
++	unsigned long tx_bytes = skb->len;
+ 
+ 	/* When use `handover' with Network Bridge,
+ 	 * user -> TCP/IP(kernel) -> bridge device -> TCP/IP(kernel) -> this.
+@@ -1339,7 +1340,7 @@ static int vnet_xmit(struct sk_buff *skb, struct net_device *ndev)
+ 	}
+ 
+ 	ndev->stats.tx_packets++;
+-	ndev->stats.tx_bytes += skb->len;
++	ndev->stats.tx_bytes += tx_bytes;
+ 
+ 	return NETDEV_TX_OK;
+ }
+-- 
+1.7.9.5
+
