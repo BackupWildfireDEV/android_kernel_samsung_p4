@@ -193,7 +193,7 @@ SUBARCH := $(shell uname -m | sed -e s/i.86/i386/ -e s/sun4u/sparc64/ \
 # Note: Some architectures assign CROSS_COMPILE in their arch/*/Makefile
 export KBUILD_BUILDHOST := $(SUBARCH)
 ARCH		?= arm
-CROSS_COMPILE	?= /home/Daniel/GTab10.1Dev/arm-2010.09/bin/arm-none-eabi-
+CROSS_COMPILE	?= /home/Daniel/GTab10.1/arm-2010.09/bin/arm-none-eabi-
 #CROSS_COMPILE	?= /home/Daniel/GTab10.1Dev/arm-2012.03/bin/arm-none-linux-gnueabi-
 #CROSS_COMPILE	?= /home/Daniel/GTab10.1Dev/linaro-4.7-2013.02-01/bin/arm-linux-gnueabihf-
 
